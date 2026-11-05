@@ -31,6 +31,7 @@ class CacheSettingsTests(unittest.TestCase):
     def test_cached_mount_reads_in_parallel(self):
         args = throughput_mount_args(True)
         self.assertEqual(args[args.index("--transfers") + 1], "8")
+        self.assertEqual(args[args.index("--vfs-write-back") + 1], "5s")
         self.assertEqual(args[args.index("--buffer-size") + 1], "32M")
         self.assertEqual(args[args.index("--vfs-read-ahead") + 1], "128M")
         self.assertEqual(args[args.index("--vfs-read-chunk-size") + 1], "8M")
@@ -38,6 +39,7 @@ class CacheSettingsTests(unittest.TestCase):
     def test_direct_mount_skips_disk_readahead(self):
         args = throughput_mount_args(False)
         self.assertEqual(args[args.index("--transfers") + 1], "8")
+        self.assertEqual(args[args.index("--vfs-write-back") + 1], "5s")
         self.assertNotIn("--vfs-read-ahead", args)
         self.assertNotIn("--vfs-read-chunk-streams", args)
     def test_throughput_mode_must_be_bool(self):

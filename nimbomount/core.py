@@ -171,10 +171,15 @@ def throughput_mount_args(write_cache_enabled: bool) -> list[str]:
     ``--vfs-cache-mode full``. Direct-write mounts keep the transfer-slot
     and memory-buffer changes only. Stream count stays at four because MEGA
     temporarily blocks accounts that open too many API sessions.
+
+    MEGA uploads are also one connection per file in rclone, so a single
+    file cannot be split across streams. ``--transfers`` uploads up to
+    eight files at once, and ``--vfs-write-back 5s`` starts each upload
+    five seconds after the file goes idle instead of waiting 30 seconds.
     """
     if not isinstance(write_cache_enabled, bool):
         raise ValueError("Write cache mode must be enabled or disabled")
-    args = ["--transfers", "8", "--buffer-size", "32M"]
+    args = ["--transfers", "8", "--buffer-size", "32M", "--vfs-write-back", "5s"]
     if write_cache_enabled:
         args += [
             "--vfs-read-ahead", "128M",
@@ -349,7 +354,7 @@ class MountEngine:
             args = [self.binary, "--config", str(self._empty_mount_config()), "mount", REMOTE + ":", mountpoint,
                     "--rc", "--rc-addr", f"127.0.0.1:{self.rc_port}",
                     "--vfs-cache-mode", "full" if write_cache_enabled else "off", "--cache-dir", str(CACHE),
-                    "--vfs-write-back", "30s", "--vfs-cache-max-age", "87600h",
+                    "--vfs-cache-max-age", "87600h",
                     "--dir-cache-time", "2m", "--poll-interval", "0",
                     "--contimeout", "10s", "--timeout", "30s", "--retries", "3",
                     "--low-level-retries", "3", "--log-level", "ERROR",

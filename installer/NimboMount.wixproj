@@ -1,0 +1,21 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>NimboMount-Setup</OutputName>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputPath>$(MSBuildThisFileDirectory)..\dist\</OutputPath>
+    <PublishDir>$(MSBuildThisFileDirectory)artifacts\publish\</PublishDir>
+    <SuppressIces>ICE61</SuppressIces>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <BindPath Include="$(PublishDir)">
+      <BindName>publish</BindName>
+    </BindPath>
+  </ItemGroup>
+
+  <Target Name="PublishApp" BeforeTargets="BeforeBuild">
+    <Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\src\NimboMount.App\NimboMount.App.csproj&quot; -c $(Configuration) -r win-x64 --self-contained true -p:DebugType=none -p:DebugSymbols=false -o &quot;$(PublishDir)&quot;" />
+  </Target>
+</Project>

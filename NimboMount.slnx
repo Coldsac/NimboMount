@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NimboMount.App/NimboMount.App.csproj" />
+    <Project Path="src/NimboMount.Core/NimboMount.Core.csproj" />
+    <Project Path="src/NimboMount.Tests/NimboMount.Tests.csproj" />
+  </Folder>
+  <Folder Name="/installer/">
+    <Project Path="installer/NimboMount.wixproj" />
+  </Folder>
+</Solution>

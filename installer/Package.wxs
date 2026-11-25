@@ -1,0 +1,44 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="NimboMount"
+           Manufacturer="NimboMount"
+           Version="1.0.2.0"
+           UpgradeCode="7f3c1a2e-9b64-4d5e-8c17-2a6e9f0b4d31"
+           Scope="perMachine"
+           Language="1033"
+           Codepage="65001">
+    <SummaryInformation Description="Mount a MEGA cloud drive as a Windows drive letter." />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of NimboMount is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="NimboMount.exe" SourceFile="..\src\NimboMount.App\Assets\NimboMount.ico" />
+    <Property Id="ARPPRODUCTICON" Value="NimboMount.exe" />
+    <Property Id="DISABLEADVTSHORTCUTS" Value="1" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="NimboMount">
+        <Files Include="!(bindpath.publish)**">
+          <Exclude Files="!(bindpath.publish)NimboMount.exe" />
+          <Exclude Files="!(bindpath.publish)**\*.pdb" />
+          <Exclude Files="!(bindpath.publish)**\*.xml" />
+        </Files>
+        <Component Id="MainExecutable">
+          <File Id="NimboMountExe" Source="artifacts\publish\NimboMount.exe" Name="NimboMount.exe" KeyPath="yes">
+            <Shortcut Id="StartMenuShortcut"
+                      Directory="ProgramMenuFolder"
+                      Name="NimboMount"
+                      Description="Mount a MEGA cloud drive as a Windows drive letter."
+                      WorkingDirectory="INSTALLFOLDER"
+                      Icon="NimboMount.exe"
+                      Advertise="yes" />
+          </File>
+          <RegistryValue Root="HKLM"
+                         Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\[ProductCode]"
+                         Name="DisplayIcon"
+                         Type="string"
+                         Value="[#NimboMountExe],0" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+  </Package>
+</Wix>

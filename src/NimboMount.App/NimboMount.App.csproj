@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>NimboMount</RootNamespace>
+    <AssemblyName>NimboMount</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\NimboMount.ico</ApplicationIcon>
+    <ApplicationTitle>NimboMount</ApplicationTitle>
+    <Product>NimboMount</Product>
+    <Description>Mount a MEGA cloud drive as a Windows drive letter.</Description>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\NimboMount.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\NimboMount.Core\NimboMount.Core.csproj" />
+    <Reference Include="winfsp-msil">
+      <HintPath>C:\Program Files (x86)\WinFsp\bin\winfsp-msil.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -2,7 +2,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="NimboMount"
            Manufacturer="NimboMount"
-           Version="1.0.3.0"
+           Version="1.0.4.0"
            UpgradeCode="7f3c1a2e-9b64-4d5e-8c17-2a6e9f0b4d31"
            Scope="perMachine"
            Language="1033"

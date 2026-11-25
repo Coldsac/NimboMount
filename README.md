@@ -7,7 +7,7 @@ NimboMount puts your MEGA cloud on a drive letter. Open it in File Explorer, cop
 NimboMount talks to MEGA directly.
 
 <p align="center">
-  <img src="docs/images/app.png" alt="The NimboMount window: email, password, drive letter, and Connect and mount." width="440">
+  <img src="docs/images/app.png" alt="The NimboMount window: email, password, drive letter, Connect and mount, and the WinFsp notice." width="440">
 </p>
 
 <p align="center">
@@ -20,14 +20,9 @@ NimboMount talks to MEGA directly.
 | --- | --- |
 | Windows | 64-bit |
 | License | [MIT](LICENSE) |
+| Setup | [NimboMount-Setup.exe](https://github.com/Coldsac/NimboMount/releases/latest/download/NimboMount-Setup.exe) |
 
-Run the setup:
-
-```text
-dist\NimboMount-Setup.exe
-```
-
-Setup asks for administrator approval. It installs WinFsp, then NimboMount, for every account on the PC.
+The setup asks for administrator approval. It installs WinFsp, then NimboMount, for every account on the PC.
 
 - WinFsp, which creates the drive letter
 - `C:\Program Files\NimboMount`
@@ -46,7 +41,7 @@ Build the installer from source:
 dotnet build installer\bundle\NimboMount.Bundle.wixproj -c Release
 ```
 
-The build downloads the official WinFsp 2.2 installer and checks its SHA-256 before it packs that file unchanged.
+The build writes `dist\NimboMount-Setup.exe`. It downloads the official WinFsp 2.2 installer and checks its SHA-256 before it packs that file unchanged.
 
 ## Sign in
 

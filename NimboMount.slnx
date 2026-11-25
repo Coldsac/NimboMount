@@ -6,5 +6,6 @@
   </Folder>
   <Folder Name="/installer/">
     <Project Path="installer/NimboMount.wixproj" />
+    <Project Path="installer/bundle/NimboMount.Bundle.wixproj" />
   </Folder>
 </Solution>

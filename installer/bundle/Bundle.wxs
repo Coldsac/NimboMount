@@ -1,0 +1,30 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="NimboMount"
+          Manufacturer="NimboMount"
+          Version="1.0.3.0"
+          UpgradeCode="b69efe86-e8e9-48f4-9360-a5b844306529"
+          IconSourceFile="..\..\src\NimboMount.App\Assets\NimboMount.ico"
+          AboutUrl="https://github.com/Coldsac/NimboMount">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="..\License.rtf"
+          Theme="rtfLicense"
+          ShowVersion="yes"
+          SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <!-- Permanent leaves the official WinFsp driver installed after NimboMount is removed. -->
+      <MsiPackage Id="WinFsp"
+                  SourceFile="..\artifacts\winfsp\winfsp-2.2.26323.msi"
+                  Permanent="yes"
+                  Visible="yes"
+                  Vital="yes" />
+      <MsiPackage Id="NimboMountPackage"
+                  SourceFile="$(var.NimboMount.TargetPath)"
+                  Visible="no"
+                  Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

@@ -1,0 +1,21 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>NimboMount-Setup</OutputName>
+    <OutputType>Bundle</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputPath>$(MSBuildThisFileDirectory)..\..\dist\</OutputPath>
+    <WinFspMsi>$(MSBuildThisFileDirectory)..\artifacts\winfsp\winfsp-2.2.26323.msi</WinFspMsi>
+    <WinFspUrl>https://github.com/winfsp/winfsp/releases/download/v2.2/winfsp-2.2.26323.msi</WinFspUrl>
+    <WinFspSha>36CE01F9EEDBBE6842B7FB4BEDC79D7D4F71983E8ACEB6877B46A07B331C7E19</WinFspSha>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
+    <ProjectReference Include="..\NimboMount.wixproj" />
+  </ItemGroup>
+
+  <!-- The official installer is downloaded and hash-checked. The file itself is not modified. -->
+  <Target Name="FetchWinFsp" BeforeTargets="BeforeBuild">
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\fetch-winfsp.ps1&quot; -Destination &quot;$(WinFspMsi)&quot; -Url &quot;$(WinFspUrl)&quot; -ExpectedSha256 &quot;$(WinFspSha)&quot;" />
+  </Target>
+</Project>

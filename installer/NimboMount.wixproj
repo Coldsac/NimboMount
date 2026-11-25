@@ -6,6 +6,7 @@
     <OutputPath>$(MSBuildThisFileDirectory)..\dist\</OutputPath>
     <PublishDir>$(MSBuildThisFileDirectory)artifacts\publish\</PublishDir>
     <SuppressIces>ICE61</SuppressIces>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bundle\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

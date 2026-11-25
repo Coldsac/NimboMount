@@ -169,6 +169,15 @@ public partial class MainWindow : Window
         });
     }
 
+    private void OnOpenLink(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+    {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(e.Uri.AbsoluteUri)
+        {
+            UseShellExecute = true,
+        });
+        e.Handled = true;
+    }
+
     protected override void OnClosing(CancelEventArgs e)
     {
         if (!_exit)

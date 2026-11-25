@@ -19,28 +19,34 @@ NimboMount talks to MEGA directly.
 | | |
 | --- | --- |
 | Windows | 64-bit |
-| [WinFsp](https://winfsp.dev/rel/) | Creates the drive letter. Install this first. |
+| License | [MIT](LICENSE) |
 
 Run the setup:
 
 ```text
-dist\NimboMount-Setup.msi
+dist\NimboMount-Setup.exe
 ```
 
-Setup asks for administrator approval and installs NimboMount for every account on the PC.
+Setup asks for administrator approval. It installs WinFsp, then NimboMount, for every account on the PC.
 
+- WinFsp, which creates the drive letter
 - `C:\Program Files\NimboMount`
 - A Start menu shortcut
 - An uninstall entry in Windows Settings
 - The .NET runtime, included in the setup
 
-WinFsp stays a separate install. If it is missing, NimboMount opens the download page.
+Uninstalling NimboMount leaves WinFsp installed.
+
+WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos  
+[https://github.com/winfsp/winfsp](https://github.com/winfsp/winfsp)
 
 Build the installer from source:
 
 ```powershell
-dotnet build installer\NimboMount.wixproj -c Release
+dotnet build installer\bundle\NimboMount.Bundle.wixproj -c Release
 ```
+
+The build downloads the official WinFsp 2.2 installer and checks its SHA-256 before it packs that file unchanged.
 
 ## Sign in
 
@@ -96,7 +102,7 @@ The log is `%LOCALAPPDATA%\NimboMount\nimbo.log`.
 
 ## Build a loose copy
 
-This copy needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) and WinFsp.
+This copy needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) and [WinFsp](https://github.com/winfsp/winfsp). The setup above installs WinFsp for you. A loose copy does not.
 
 ```powershell
 dotnet publish src\NimboMount.App\NimboMount.App.csproj -c Release -r win-x64 --self-contained false -o dist

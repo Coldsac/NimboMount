@@ -2,7 +2,7 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="NimboMount"
            Manufacturer="NimboMount"
-           Version="1.0.2.0"
+           Version="1.0.3.0"
            UpgradeCode="7f3c1a2e-9b64-4d5e-8c17-2a6e9f0b4d31"
            Scope="perMachine"
            Language="1033"
@@ -14,6 +14,7 @@
     <Property Id="ARPPRODUCTICON" Value="NimboMount.exe" />
     <Property Id="DISABLEADVTSHORTCUTS" Value="1" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="NimboMount">
@@ -37,6 +38,9 @@
                          Name="DisplayIcon"
                          Type="string"
                          Value="[#NimboMountExe],0" />
+        </Component>
+        <Component Id="LicenseText">
+          <File Id="LicenseTextFile" Source="..\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>

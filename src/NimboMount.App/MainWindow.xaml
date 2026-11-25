@@ -4,9 +4,9 @@
         Title="NimboMount"
         Icon="Assets/NimboMount.ico"
         Width="480"
-        Height="740"
+        Height="780"
         MinWidth="420"
-        MinHeight="620"
+        MinHeight="680"
         WindowStartupLocation="CenterScreen"
         Background="#121212"
         Foreground="#F4F4F4"
@@ -241,6 +241,13 @@
             </DockPanel>
             <ProgressBar x:Name="QuotaBar" Height="6" Minimum="0" Maximum="100" Background="#2A2A2A" Foreground="#E10600" BorderThickness="0"/>
             <TextBlock Text="Files upload to MEGA when the copy finishes and the file closes." Foreground="#7A7A7A" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"/>
+            <TextBlock FontSize="11" Foreground="#7A7A7A" TextWrapping="Wrap" Margin="0,12,0,0">
+                <Run Text="WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos"/>
+                <LineBreak/>
+                <Hyperlink NavigateUri="https://github.com/winfsp/winfsp" RequestNavigate="OnOpenLink" Foreground="#9EC1FF" TextDecorations="Underline">
+                    <Run Text="https://github.com/winfsp/winfsp"/>
+                </Hyperlink>
+            </TextBlock>
         </StackPanel>
 
         <ListBox x:Name="LogList" Grid.Row="6" Background="#181818" Foreground="#C8C8C8" BorderBrush="#2E2E2E" FontFamily="Cascadia Mono, Consolas" FontSize="12"/>

@@ -2,7 +2,7 @@
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
   <Bundle Name="NimboMount"
           Manufacturer="NimboMount"
-          Version="1.0.4.0"
+          Version="1.0.5.0"
           UpgradeCode="b69efe86-e8e9-48f4-9360-a5b844306529"
           IconSourceFile="..\..\src\NimboMount.App\Assets\NimboMount.ico"
           AboutUrl="https://github.com/Coldsac/NimboMount">

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Nodes;
 using NimboMount.Drive;
@@ -61,6 +62,86 @@ public class ProtocolTests
         var fromStream = MegaCrypto.ChunkMac(stream, key, nonce);
         Assert.Equal(8, fromSpan.Length);
         Assert.Equal(fromSpan, fromStream);
+    }
+
+    [Fact]
+    public void ChunkBoundariesGrowUntilOneMegabyte()
+    {
+        long offset = 0;
+        var chunk = 128 * 1024;
+        for (var i = 0; i < 8; i++)
+        {
+            Assert.Equal(chunk, MegaCrypto.ChunkSizeAt(offset));
+            offset += chunk;
+            if (chunk < 1024 * 1024)
+            {
+                chunk += 128 * 1024;
+            }
+        }
+
+        Assert.Equal(1024 * 1024, MegaCrypto.ChunkSizeAt(offset));
+        Assert.Equal(1024 * 1024, MegaCrypto.ChunkSizeAt(offset + (1024 * 1024)));
+        Assert.Equal(50, MegaCrypto.ChunkLength(0, 50));
+        Assert.Equal(128 * 1024, MegaCrypto.ChunkLength(0, 300_000));
+        Assert.Equal(300_000 - (128 * 1024), MegaCrypto.ChunkLength(128 * 1024, 300_000));
+    }
+
+    [Fact]
+    public void IncrementalChunkMacMatchesTheWholeFile()
+    {
+        var key = Enumerable.Range(0, 16).Select(value => (byte)(7 + value)).ToArray();
+        var nonce = new byte[] { 9, 8, 7, 6, 5, 4, 3, 2 };
+        var data = new byte[300_000];
+        for (var i = 0; i < data.Length; i++)
+        {
+            data[i] = (byte)(i * 17);
+        }
+
+        MegaCrypto.CryptCtr(data, key, nonce, 0);
+        var builder = new MegaCrypto.ChunkMacBuilder(key, nonce);
+        long offset = 0;
+        while (offset < data.Length)
+        {
+            var length = MegaCrypto.ChunkLength(offset, data.Length);
+            builder.Add(data.AsSpan((int)offset, length));
+            offset += length;
+        }
+
+        Assert.Equal(MegaCrypto.ChunkMac(data, key, nonce), builder.Finish());
+    }
+
+    [Fact]
+    public void UploadMeterKeepsSpeedAndDropsFinishedFiles()
+    {
+        long now = 0;
+        var meter = new UploadMeter(() => now);
+        meter.Apply(new UploadSample("a", "movie.mkv", 0, 2_000, true));
+        now = Stopwatch.Frequency;
+        meter.Apply(new UploadSample("a", "movie.mkv", 1_500, 2_000, true));
+        meter.Apply(new UploadSample("b", "notes.txt", 20, 20, true));
+        var views = meter.Snapshot();
+        Assert.Equal(2, views.Length);
+        var movie = Assert.Single(views, view => view.Name == "movie.mkv");
+        Assert.Equal(1_500, movie.Sent);
+        Assert.InRange(movie.BytesPerSecond, 1_400, 1_600);
+        Assert.Equal("75% · 1.5 KB/s", UploadCaption.Detail(movie.Sent, movie.Total, movie.BytesPerSecond));
+        meter.Apply(new UploadSample("a", "movie.mkv", 0, 0, false));
+        Assert.Equal("notes.txt", Assert.Single(meter.Snapshot()).Name);
+    }
+
+    [Fact]
+    public void TrayTipNamesTheUploadAndStaysShort()
+    {
+        var one = new UploadView("movie.mkv", 420_000, 1_000_000, 1.5d * 1024 * 1024);
+        var tip = UploadCaption.Tray([one]);
+        Assert.Contains("movie.mkv", tip);
+        Assert.Contains("42%", tip);
+        Assert.Contains("1.5 MB/s", tip);
+        Assert.True(tip.Length <= 127);
+        var longName = new UploadView(new string('n', 200) + ".mkv", 10, 100, double.NaN);
+        Assert.Equal(127, UploadCaption.Tray([longName]).Length);
+        Assert.Equal("NimboMount", UploadCaption.Tray([]));
+        Assert.Equal("10%", UploadCaption.Detail(10, 100, double.NaN));
     }
 
     [Fact]

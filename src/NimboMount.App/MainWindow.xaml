@@ -240,7 +240,11 @@
                 <TextBlock x:Name="QuotaDetail" Text="" Foreground="#9A9A9A" HorizontalAlignment="Right"/>
             </DockPanel>
             <ProgressBar x:Name="QuotaBar" Height="6" Minimum="0" Maximum="100" Background="#2A2A2A" Foreground="#E10600" BorderThickness="0"/>
-            <TextBlock Text="Files upload to MEGA when the copy finishes and the file closes." Foreground="#7A7A7A" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"/>
+            <TextBlock x:Name="UploadHint" Text="Files start uploading to MEGA while they are copied." Foreground="#7A7A7A" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap"/>
+            <StackPanel x:Name="UploadPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                <TextBlock Text="Uploads" Foreground="#9A9A9A" Margin="0,0,0,6"/>
+                <StackPanel x:Name="UploadList"/>
+            </StackPanel>
             <TextBlock FontSize="11" Foreground="#7A7A7A" TextWrapping="Wrap" Margin="0,12,0,0">
                 <Run Text="WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos"/>
                 <LineBreak/>

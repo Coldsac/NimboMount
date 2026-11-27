@@ -270,6 +270,97 @@ internal static class MegaCrypto
         return CondenseMac(fileMac);
     }
 
+    // Chunk i is min(1 MiB, (i + 1) * 128 KiB). A POST has to start and end on one of these boundaries.
+    public static int ChunkSizeAt(long offset)
+    {
+        if (offset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+
+        long position = 0;
+        var chunk = 0x20000;
+        while (position < offset)
+        {
+            if (offset - position < chunk)
+            {
+                throw new ArgumentOutOfRangeException(nameof(offset));
+            }
+
+            position += chunk;
+            if (chunk < 0x100000)
+            {
+                chunk += 0x20000;
+            }
+        }
+
+        return chunk;
+    }
+
+    public static int ChunkLength(long offset, long fileSize)
+    {
+        if (offset < 0 || fileSize < offset)
+        {
+            throw new ArgumentOutOfRangeException(nameof(offset));
+        }
+
+        var remain = fileSize - offset;
+        if (remain == 0)
+        {
+            return 0;
+        }
+
+        return (int)Math.Min(ChunkSizeAt(offset), remain);
+    }
+
+    public sealed class ChunkMacBuilder
+    {
+        private readonly byte[] _aesKey;
+        private readonly byte[] _iv = new byte[16];
+        private readonly byte[] _fileMac = new byte[16];
+        private byte[]? _condensed;
+        private int _chunk = 0x20000;
+        private bool _closed;
+
+        public ChunkMacBuilder(byte[] aesKey, byte[] nonce)
+        {
+            _aesKey = aesKey;
+            nonce.AsSpan(0, 8).CopyTo(_iv);
+        }
+
+        public void Add(ReadOnlySpan<byte> ciphertext)
+        {
+            if (_closed)
+            {
+                throw new InvalidOperationException("The file MAC is already finished.");
+            }
+
+            if (ciphertext.Length <= 0 || ciphertext.Length > _chunk)
+            {
+                throw new ArgumentOutOfRangeException(nameof(ciphertext));
+            }
+
+            var full = ciphertext.Length == _chunk;
+            MacChunk(ciphertext, _aesKey, _iv, _fileMac);
+            if (!full)
+            {
+                _closed = true;
+                return;
+            }
+
+            if (_chunk < 0x100000)
+            {
+                _chunk += 0x20000;
+            }
+        }
+
+        public byte[] Finish()
+        {
+            _closed = true;
+            return _condensed ??= CondenseMac(_fileMac);
+        }
+    }
+
     public static byte[] ChunkMac(Stream ciphertext, byte[] aesKey, byte[] nonce)
     {
         var fileMac = new byte[16];

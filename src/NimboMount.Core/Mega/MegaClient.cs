@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Numerics;
@@ -332,83 +333,61 @@ public sealed class MegaClient : ICloudStore, IDisposable
         return ToCloud(created);
     }
 
+    public async Task<IUploadSession> BeginUploadAsync(long size, CancellationToken cancellationToken)
+    {
+        EnsureReady();
+        if (size <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(size));
+        }
+
+        var url = await RequestUploadUrlAsync(size, cancellationToken).ConfigureAwait(false);
+        return new StreamingUpload(this, size, url, MegaCrypto.Random(16), MegaCrypto.Random(8));
+    }
+
     public async Task<CloudNode> UploadAsync(
         string parentHandle,
         string name,
         string plainPath,
         string? replaceHandle,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<long>? onBytesSent = null)
     {
         EnsureReady();
         var length = new FileInfo(plainPath).Length;
-        long replaced = 0;
-        if (!string.IsNullOrEmpty(replaceHandle))
-        {
-            lock (_gate)
-            {
-                if (_nodes.TryGetValue(replaceHandle, out var previous))
-                {
-                    replaced = previous.Size;
-                }
-            }
-        }
         var aesKey = MegaCrypto.Random(16);
         var nonce = MegaCrypto.Random(8);
-        var cipherPath = plainPath + ".cipher";
+        var cipherPath = plainPath + "." + Guid.NewGuid().ToString("n") + ".cipher";
         try
         {
-            await using (var input = new FileStream(plainPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan))
-            await using (var output = new FileStream(cipherPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.SequentialScan))
+            await using var input = FileRetry.Open(plainPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, FileOptions.SequentialScan);
+            await using var output = FileRetry.Open(
+                cipherPath,
+                FileMode.CreateNew,
+                FileAccess.ReadWrite,
+                FileShare.Read,
+                FileOptions.SequentialScan | FileOptions.DeleteOnClose);
+            var buffer = new byte[1024 * 1024];
+            long offset = 0;
+            while (true)
             {
-                var buffer = new byte[1024 * 1024];
-                long offset = 0;
-                while (true)
+                var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                if (read == 0)
                 {
-                    var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-                    if (read == 0)
-                    {
-                        break;
-                    }
-
-                    MegaCrypto.CryptCtr(buffer.AsSpan(0, read), aesKey, nonce, offset);
-                    await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    offset += read;
+                    break;
                 }
+
+                MegaCrypto.CryptCtr(buffer.AsSpan(0, read), aesKey, nonce, offset);
+                await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                offset += read;
             }
 
-            byte[] mac;
-            await using (var cipher = new FileStream(cipherPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                mac = MegaCrypto.ChunkMac(cipher, aesKey, nonce);
-            }
-
+            output.Position = 0;
+            var mac = MegaCrypto.ChunkMac(output, aesKey, nonce);
+            output.Position = 0;
             var fileKey = MegaCrypto.PackFileKey(aesKey, nonce, mac);
-            var node = new JsonObject
-            {
-                ["t"] = 0,
-                ["h"] = await PostFileAsync(cipherPath, length, cancellationToken).ConfigureAwait(false),
-                ["a"] = MegaCodec.ToBase64(MegaCrypto.EncryptAttributes(name, aesKey)),
-                ["k"] = MegaCodec.ToBase64(MegaCrypto.AesEcbCrypt(fileKey, _masterKey!, encrypt: true)),
-            };
-            if (!string.IsNullOrEmpty(replaceHandle))
-            {
-                node["ov"] = replaceHandle;
-            }
-
-            var response = await InvokeAsync(PutRequest(parentHandle, node), cancellationToken).ConfigureAwait(false);
-            var created = ReadCreatedNode(response, parentHandle, name, isDirectory: false, length);
-            Remember(created, fileKey, folder: false);
-            if (!string.IsNullOrEmpty(replaceHandle) && replaceHandle != created.Handle)
-            {
-                lock (_gate)
-                {
-                    _nodes.Remove(replaceHandle);
-                }
-            }
-
-            TryDelete(Path.Combine(CacheRoot, created.Handle));
-            UsedBytes = Math.Max(0, UsedBytes - replaced + length);
-            return ToCloud(created);
+            var handle = await PostFileAsync(output, length, cancellationToken, onBytesSent).ConfigureAwait(false);
+            return await PublishFileAsync(parentHandle, name, replaceHandle, length, handle, aesKey, fileKey, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -479,7 +458,57 @@ public sealed class MegaClient : ICloudStore, IDisposable
 
     public void Dispose() => _http.Dispose();
 
-    private async Task<string> PostFileAsync(string cipherPath, long length, CancellationToken cancellationToken)
+    private async Task<CloudNode> PublishFileAsync(
+        string parentHandle,
+        string name,
+        string? replaceHandle,
+        long length,
+        string completionHandle,
+        byte[] aesKey,
+        byte[] fileKey,
+        CancellationToken cancellationToken)
+    {
+        long replaced = 0;
+        if (!string.IsNullOrEmpty(replaceHandle))
+        {
+            lock (_gate)
+            {
+                if (_nodes.TryGetValue(replaceHandle, out var previous))
+                {
+                    replaced = previous.Size;
+                }
+            }
+        }
+
+        var node = new JsonObject
+        {
+            ["t"] = 0,
+            ["h"] = completionHandle,
+            ["a"] = MegaCodec.ToBase64(MegaCrypto.EncryptAttributes(name, aesKey)),
+            ["k"] = MegaCodec.ToBase64(MegaCrypto.AesEcbCrypt(fileKey, _masterKey!, encrypt: true)),
+        };
+        if (!string.IsNullOrEmpty(replaceHandle))
+        {
+            node["ov"] = replaceHandle;
+        }
+
+        var response = await InvokeAsync(PutRequest(parentHandle, node), cancellationToken).ConfigureAwait(false);
+        var created = ReadCreatedNode(response, parentHandle, name, isDirectory: false, length);
+        Remember(created, fileKey, folder: false);
+        if (!string.IsNullOrEmpty(replaceHandle) && replaceHandle != created.Handle)
+        {
+            lock (_gate)
+            {
+                _nodes.Remove(replaceHandle);
+            }
+        }
+
+        TryDelete(Path.Combine(CacheRoot, created.Handle));
+        UsedBytes = Math.Max(0, UsedBytes - replaced + length);
+        return ToCloud(created);
+    }
+
+    private async Task<string> RequestUploadUrlAsync(long length, CancellationToken cancellationToken)
     {
         var response = await InvokeAsync(new JsonObject { ["a"] = "u", ["s"] = length, ["ssl"] = 2 }, cancellationToken).ConfigureAwait(false);
         var url = response.ValueKind == JsonValueKind.String
@@ -490,14 +519,49 @@ public sealed class MegaClient : ICloudStore, IDisposable
             throw new MegaException("MEGA did not return an upload address.");
         }
 
-        await using var stream = new FileStream(cipherPath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
-        using var content = new StreamContent(stream);
+        return url;
+    }
+
+    private async Task<string> PostFileAsync(Stream cipher, long length, CancellationToken cancellationToken, Action<long>? onBytesSent = null)
+    {
+        var url = await RequestUploadUrlAsync(length, cancellationToken).ConfigureAwait(false);
+        cipher.Position = 0;
+        using var reported = new ReportingStream(cipher, length, onBytesSent);
+        using var content = new StreamContent(reported);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         using var posted = await _http.PostAsync(url.TrimEnd('/') + "/0", content, cancellationToken).ConfigureAwait(false);
         var body = (await posted.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)).Trim();
-        if (!posted.IsSuccessStatusCode || body.Length == 0 || body.StartsWith('-') || body.StartsWith('<'))
+        return ReadCompletion(body, posted.IsSuccessStatusCode, finalChunk: true)
+            ?? throw new MegaException("MEGA did not accept the upload.");
+    }
+
+    private async Task<string?> PostChunkAsync(string url, long offset, byte[] cipher, bool finalChunk, CancellationToken cancellationToken)
+    {
+        using var content = new ByteArrayContent(cipher);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        using var posted = await _http.PostAsync(
+            url.TrimEnd('/') + "/" + offset.ToString(CultureInfo.InvariantCulture),
+            content,
+            cancellationToken).ConfigureAwait(false);
+        var body = (await posted.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)).Trim();
+        return ReadCompletion(body, posted.IsSuccessStatusCode, finalChunk);
+    }
+
+    private static string? ReadCompletion(string body, bool httpOk, bool finalChunk)
+    {
+        if (!httpOk || body.StartsWith('-') || body.StartsWith('<'))
         {
             throw new MegaException("MEGA did not accept the upload.");
+        }
+
+        if (body.Length == 0)
+        {
+            if (finalChunk)
+            {
+                throw new MegaException("MEGA did not accept the upload.");
+            }
+
+            return null;
         }
 
         if (body.StartsWith('"'))
@@ -1209,4 +1273,187 @@ public sealed class MegaClient : ICloudStore, IDisposable
     }
 
     private readonly record struct BigIntegerPair(System.Numerics.BigInteger Exponent, System.Numerics.BigInteger Modulus);
+
+    private sealed class ReportingStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _length;
+        private readonly Action<long>? _report;
+        private long _counted;
+        private long _reported;
+
+        public ReportingStream(Stream inner, long length, Action<long>? report)
+        {
+            _inner = inner;
+            _length = length;
+            _report = report;
+        }
+
+        public override bool CanRead => _inner.CanRead;
+
+        public override bool CanSeek => _inner.CanSeek;
+
+        public override bool CanWrite => false;
+
+        public override long Length => _inner.Length;
+
+        public override long Position
+        {
+            get => _inner.Position;
+            set => _inner.Position = value;
+        }
+
+        public override void Flush() => _inner.Flush();
+
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var read = _inner.Read(buffer, offset, count);
+            Count(read);
+            return read;
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            var read = _inner.Read(buffer);
+            Count(read);
+            return read;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var read = await _inner.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            Count(read);
+            return read;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            return ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private void Count(int read)
+        {
+            if (read <= 0 || _report == null)
+            {
+                return;
+            }
+
+            _counted += read;
+            if (_counted - _reported >= 256 * 1024 || _counted == _length)
+            {
+                _reported = _counted;
+                _report(_counted);
+            }
+        }
+    }
+
+    private sealed class StreamingUpload : IUploadSession
+    {
+        private readonly MegaClient _client;
+        private readonly long _size;
+        private readonly string _url;
+        private readonly byte[] _aesKey;
+        private readonly byte[] _nonce;
+        private readonly MegaCrypto.ChunkMacBuilder _mac;
+        private readonly object _gate = new();
+        private long _next;
+        private string? _completion;
+        private bool _abandoned;
+        private bool _completed;
+
+        public StreamingUpload(MegaClient client, long size, string url, byte[] aesKey, byte[] nonce)
+        {
+            _client = client;
+            _size = size;
+            _url = url;
+            _aesKey = aesKey;
+            _nonce = nonce;
+            _mac = new MegaCrypto.ChunkMacBuilder(aesKey, nonce);
+        }
+
+        public async Task WriteChunkAsync(long offset, ReadOnlyMemory<byte> plaintext, CancellationToken cancellationToken)
+        {
+            var length = plaintext.Length;
+            var full = MegaCrypto.ChunkSizeAt(offset);
+            var last = offset + length == _size;
+            if (length <= 0 || length > full || (!last && length != full))
+            {
+                throw new MegaException("Upload chunk is not on a MEGA boundary.");
+            }
+
+            lock (_gate)
+            {
+                if (_abandoned || _completed)
+                {
+                    throw new MegaException("The upload was cancelled.");
+                }
+
+                if (offset != _next)
+                {
+                    throw new MegaException("Upload chunk is out of order.");
+                }
+            }
+
+            var cipher = plaintext.ToArray();
+            MegaCrypto.CryptCtr(cipher, _aesKey, _nonce, offset);
+            var handle = await _client.PostChunkAsync(_url, offset, cipher, last, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                if (_abandoned || _completed)
+                {
+                    throw new MegaException("The upload was cancelled.");
+                }
+
+                _mac.Add(cipher);
+                _next = offset + length;
+                if (!string.IsNullOrEmpty(handle))
+                {
+                    _completion = handle;
+                }
+            }
+        }
+
+        public Task<CloudNode> CompleteAsync(string parentHandle, string name, string? replaceHandle, CancellationToken cancellationToken)
+        {
+            string completion;
+            byte[] fileKey;
+            lock (_gate)
+            {
+                if (_abandoned || _completed || _next != _size || string.IsNullOrEmpty(_completion))
+                {
+                    throw new MegaException("The upload is not finished.");
+                }
+
+                _completed = true;
+                completion = _completion;
+                fileKey = MegaCrypto.PackFileKey(_aesKey, _nonce, _mac.Finish());
+            }
+
+            return _client.PublishFileAsync(parentHandle, name, replaceHandle, _size, completion, _aesKey, fileKey, cancellationToken);
+        }
+
+        public void Abandon()
+        {
+            lock (_gate)
+            {
+                _abandoned = true;
+            }
+        }
+    }
 }

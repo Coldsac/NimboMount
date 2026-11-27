@@ -11,7 +11,7 @@ NimboMount talks to MEGA directly.
 </p>
 
 <p align="center">
-  <img src="docs/images/flow.png" alt="Open the letter. Read, and it decrypts. Close, and it uploads." width="100%">
+  <img src="docs/images/flow.png" alt="Open the letter. Read, and it decrypts. Copy, and it uploads." width="100%">
 </p>
 
 ## Install
@@ -62,7 +62,7 @@ If the account uses an authenticator, the code box appears after the first attem
 
 ## While it is running
 
-Closing the window leaves the drive mounted. NimboMount stays in the system tray.
+Closing the window leaves the drive mounted. NimboMount stays in the system tray. While a file is uploading, the window and the tray icon show its percent and speed.
 
 | Tray | |
 | --- | --- |
@@ -79,7 +79,7 @@ The root of the volume is your Cloud Drive. Inbox and Rubbish Bin stay hidden. S
 | Action | What happens |
 | --- | --- |
 | Open a file | The piece you read is downloaded, decrypted, and cached. |
-| Save a file | The local copy is written first. The upload starts when the last program closes the file. |
+| Save a file | The upload starts while the file is copied. MEGA receives the file when the copy closes. |
 | New folder | The folder is created in the cloud immediately. |
 | Rename or delete | The change is sent to MEGA. |
 
@@ -107,6 +107,6 @@ Start `dist\NimboMount.exe`.
 
 ## Limits
 
-- A very large copy finishes its upload before Explorer reports that the copy is done.
+- A save that never sets the file size uploads when the file closes. Cancelling a copy does not leave a partial file in MEGA.
 - MEGA replaces a whole file. There is no partial write to an existing cloud file.
 - Nodes whose keys cannot be opened are left out of the drive.

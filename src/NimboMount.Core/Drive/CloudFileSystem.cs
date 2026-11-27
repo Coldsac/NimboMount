@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -13,19 +14,22 @@ public sealed class CloudFileSystem : FileSystemBase
 {
     private readonly ICloudStore _store;
     private readonly Action<string>? _log;
+    private readonly Action<UploadSample>? _progress;
     private readonly string _workDirectory;
     private readonly string _stagingDirectory;
     private readonly object _tree = new();
     private readonly object _journal = new();
+    private readonly ConcurrentDictionary<string, object> _uploadGates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Entry> _byHandle = new(StringComparer.Ordinal);
     private readonly Entry _root;
     private readonly byte[] _security;
     private string _label = "NimboMount";
 
-    public CloudFileSystem(ICloudStore store, string workDirectory, Action<string>? log = null)
+    public CloudFileSystem(ICloudStore store, string workDirectory, Action<string>? log = null, Action<UploadSample>? progress = null)
     {
         _store = store;
         _log = log;
+        _progress = progress;
         _workDirectory = workDirectory;
         _stagingDirectory = Path.Combine(workDirectory, "staging");
         Directory.CreateDirectory(_stagingDirectory);
@@ -128,6 +132,7 @@ public sealed class CloudFileSystem : FileSystemBase
 
     public void RecoverInterrupted()
     {
+        SweepStagingTemps();
         List<PendingItem> pending;
         lock (_journal)
         {
@@ -146,18 +151,37 @@ public sealed class CloudFileSystem : FileSystemBase
                 continue;
             }
 
+            var length = new System.IO.FileInfo(item.StagingPath).Length;
+            Report(item.StagingPath, item.RemoteName, 0, length, true);
             try
             {
-                Wait(_store.UploadAsync(item.ParentHandle, item.RemoteName, item.StagingPath, item.ReplaceHandle, CancellationToken.None));
-                TryDelete(item.StagingPath);
-                RemoveJournal(item.StagingPath);
-                _log?.Invoke($"Finished an interrupted upload of {item.RemoteName}.");
+                try
+                {
+                    FileRetry.Run(() => Wait(_store.UploadAsync(
+                        item.ParentHandle,
+                        item.RemoteName,
+                        item.StagingPath,
+                        item.ReplaceHandle,
+                        CancellationToken.None,
+                        sent => Report(item.StagingPath, item.RemoteName, sent, length, true))));
+                    TryDelete(item.StagingPath);
+                    RemoveJournal(item.StagingPath);
+                    _log?.Invoke($"Finished an interrupted upload of {item.RemoteName}.");
+                }
+                catch (Exception ex) when (FileRetry.IsSharingViolation(Unwrap(ex)))
+                {
+                    _log?.Invoke($"Could not finish the upload of {item.RemoteName} yet. The local copy is still open, so it will be sent the next time the drive mounts.");
+                }
+                catch (Exception ex)
+                {
+                    var error = Unwrap(ex);
+                    _log?.Invoke($"Could not finish the upload of {item.RemoteName}: {error.Message}");
+                    ExceptionDispatchInfo.Capture(error).Throw();
+                }
             }
-            catch (Exception ex)
+            finally
             {
-                var error = Unwrap(ex);
-                _log?.Invoke($"Could not finish the upload of {item.RemoteName}: {error.Message}");
-                ExceptionDispatchInfo.Capture(error).Throw();
+                Report(item.StagingPath, item.RemoteName, 0, 0, false);
             }
         }
 
@@ -184,12 +208,20 @@ public sealed class CloudFileSystem : FileSystemBase
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 int generation;
+                bool streaming;
                 lock (entry.Gate)
                 {
                     generation = entry.Generation;
+                    streaming = entry.Opens > 0 && entry.Live != null && !entry.Live.Abandoned;
                 }
 
-                Upload(entry, generation, cancellationToken);
+                // The copy is still writing. Its chunks are already going out, so a second upload would fight over the same file.
+                if (streaming)
+                {
+                    continue;
+                }
+
+                Commit(entry, generation, cancellationToken);
             }
         }, cancellationToken);
     }
@@ -596,6 +628,7 @@ public sealed class CloudFileSystem : FileSystemBase
 
             var data = new byte[length];
             Marshal.Copy(buffer, data, 0, data.Length);
+            LiveUpload? live = null;
             lock (entry.Gate)
             {
                 if (string.IsNullOrEmpty(entry.StagingPath))
@@ -616,9 +649,16 @@ public sealed class CloudFileSystem : FileSystemBase
                     entry.Size = end;
                 }
 
+                NoteWrite(entry, (long)offset, end);
                 entry.Dirty = true;
                 entry.Generation++;
                 entry.Modified = DateTimeOffset.UtcNow;
+                live = entry.Live;
+            }
+
+            if (live != null)
+            {
+                Wake(live);
             }
 
             Remember(entry);
@@ -689,6 +729,7 @@ public sealed class CloudFileSystem : FileSystemBase
             var target = setAllocationSize ? Math.Min(newSize, (ulong)Math.Max(0, current)) : newSize;
             if (target == (ulong)Math.Max(0, current))
             {
+                MaybeStartLive(entry);
                 fileInfo = Describe(entry);
                 return STATUS_SUCCESS;
             }
@@ -712,13 +753,24 @@ public sealed class CloudFileSystem : FileSystemBase
                 {
                     using var stream = new FileStream(entry.StagingPath!, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
                     stream.SetLength((long)target);
+                    if (entry.Live != null && entry.Live.Target != (long)target)
+                    {
+                        Abandon(entry, sticky: true);
+                    }
+
                     entry.Size = (long)target;
+                    if (entry.Written > entry.Size)
+                    {
+                        entry.Written = entry.Size;
+                    }
+
                     entry.Dirty = true;
                     entry.Generation++;
                     entry.Modified = DateTimeOffset.UtcNow;
                 }
 
                 Remember(entry);
+                MaybeStartLive(entry);
             }
 
             fileInfo = Describe(entry);
@@ -1009,7 +1061,7 @@ public sealed class CloudFileSystem : FileSystemBase
 
         try
         {
-            Upload(entry, generation, CancellationToken.None);
+            Commit(entry, generation, CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -1017,79 +1069,459 @@ public sealed class CloudFileSystem : FileSystemBase
         }
     }
 
+    // MEGA needs the final size before the first byte can leave. After that, each full chunk is sent while the copy is still writing.
+    private void MaybeStartLive(Entry entry)
+    {
+        string? id = null;
+        string? name = null;
+        long total = 0;
+        lock (entry.Gate)
+        {
+            if (entry.IsDirectory || entry.DeletePending || entry.UploadAbandoned || entry.Live != null)
+            {
+                return;
+            }
+
+            if (!entry.Dirty || entry.Size <= 0 || string.IsNullOrEmpty(entry.StagingPath))
+            {
+                return;
+            }
+
+            var upload = new LiveUpload { Target = entry.Size };
+            upload.Pump = Task.Run(() => PumpLive(entry, upload));
+            entry.Live = upload;
+            id = entry.StagingPath ?? entry.Handle;
+            name = entry.RemoteName;
+            total = entry.Size;
+        }
+
+        if (id != null && name != null)
+        {
+            Report(id, name, 0, total, true);
+        }
+    }
+
+    private void PumpLive(Entry entry, LiveUpload live)
+    {
+        try
+        {
+            var session = Wait(_store.BeginUploadAsync(live.Target, live.Cancel.Token));
+            string name;
+            lock (entry.Gate)
+            {
+                if (live.Abandoned || entry.Live != live)
+                {
+                    session.Abandon();
+                    return;
+                }
+
+                live.Session = session;
+                name = entry.RemoteName;
+            }
+
+            _log?.Invoke($"Uploading {name}.");
+            while (true)
+            {
+                byte[]? plain = null;
+                long sent = 0;
+                lock (entry.Gate)
+                {
+                    if (live.Abandoned || entry.Live != live || live.Sent >= live.Target)
+                    {
+                        return;
+                    }
+
+                    var length = MegaCrypto.ChunkLength(live.Sent, live.Target);
+                    if (length <= 0)
+                    {
+                        return;
+                    }
+
+                    if (ChunkIsReady(entry, live))
+                    {
+                        if (string.IsNullOrEmpty(entry.StagingPath))
+                        {
+                            Abandon(entry, sticky: true);
+                            return;
+                        }
+
+                        sent = live.Sent;
+                        live.Reserved = sent + length;
+                        plain = new byte[length];
+                        using var stream = new FileStream(entry.StagingPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4096, FileOptions.SequentialScan);
+                        stream.Position = sent;
+                        stream.ReadExactly(plain);
+                    }
+                }
+
+                if (plain == null)
+                {
+                    live.Signal.Reset();
+                    var proceed = false;
+                    lock (entry.Gate)
+                    {
+                        proceed = live.Abandoned || entry.Live != live || ChunkIsReady(entry, live);
+                    }
+
+                    if (!proceed)
+                    {
+                        live.Signal.Wait(TimeSpan.FromSeconds(2));
+                    }
+
+                    continue;
+                }
+
+                Wait(session.WriteChunkAsync(sent, plain, live.Cancel.Token));
+                string? id = null;
+                var reportName = "";
+                long sentNow = 0;
+                lock (entry.Gate)
+                {
+                    if (live.Abandoned || entry.Live != live)
+                    {
+                        return;
+                    }
+
+                    live.Sent = sent + plain.Length;
+                    id = entry.StagingPath ?? entry.Handle;
+                    reportName = entry.RemoteName;
+                    sentNow = live.Sent;
+                }
+
+                Report(id, reportName, sentNow, live.Target, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (entry.Gate)
+            {
+                if (live.Abandoned || entry.Live != live)
+                {
+                    return;
+                }
+
+                live.Fault = Unwrap(ex);
+                Abandon(entry, sticky: true);
+            }
+        }
+        finally
+        {
+            live.DisposeSignals();
+        }
+    }
+
+    private static bool ChunkIsReady(Entry entry, LiveUpload live)
+    {
+        if (live.Sent >= live.Target)
+        {
+            return true;
+        }
+
+        var length = MegaCrypto.ChunkLength(live.Sent, live.Target);
+        if (length <= 0)
+        {
+            return true;
+        }
+
+        var covered = live.Closed ? live.Target : Math.Min(entry.Written, live.Target);
+        return live.Sent + length == live.Target ? covered >= live.Target : covered >= live.Sent + length;
+    }
+
+    private void NoteWrite(Entry entry, long offset, long end)
+    {
+        var live = entry.Live;
+        if (live != null && !live.Abandoned && (offset < live.Reserved || end > live.Target))
+        {
+            Abandon(entry, sticky: true);
+        }
+
+        if (!entry.UploadAbandoned && offset <= entry.Written && end > entry.Written)
+        {
+            entry.Written = end;
+        }
+    }
+
+    private void Abandon(Entry entry, bool sticky)
+    {
+        if (sticky)
+        {
+            entry.UploadAbandoned = true;
+        }
+
+        var live = entry.Live;
+        if (live == null)
+        {
+            return;
+        }
+
+        var id = entry.StagingPath ?? entry.Handle;
+        var name = entry.RemoteName;
+        live.Abandoned = true;
+        entry.Live = null;
+        try
+        {
+            live.Session?.Abandon();
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            live.Cancel.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+
+        Wake(live);
+        Report(id, name, 0, 0, false);
+    }
+
+    private static void Wake(LiveUpload live)
+    {
+        try
+        {
+            live.Signal.Set();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private void Commit(Entry entry, int generation, CancellationToken cancellationToken)
+    {
+        LiveUpload? live;
+        lock (entry.Gate)
+        {
+            live = entry.Live;
+            if (live != null && !live.Abandoned)
+            {
+                live.Closed = true;
+            }
+        }
+
+        if (live != null)
+        {
+            Wake(live);
+            try
+            {
+                Wait(live.Pump);
+            }
+            catch (Exception ex)
+            {
+                lock (entry.Gate)
+                {
+                    if (entry.Live == live)
+                    {
+                        live.Fault = Unwrap(ex);
+                        Abandon(entry, sticky: true);
+                    }
+                }
+            }
+
+            if (!live.Abandoned && live.Fault == null && live.Session != null && live.Sent == live.Target)
+            {
+                try
+                {
+                    if (CompleteLive(entry, live, generation, cancellationToken))
+                    {
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (entry.Gate)
+                    {
+                        if (entry.Live == live)
+                        {
+                            live.Fault = Unwrap(ex);
+                            Abandon(entry, sticky: true);
+                        }
+                    }
+                }
+            }
+        }
+
+        Upload(entry, generation, cancellationToken);
+    }
+
+    private bool CompleteLive(Entry entry, LiveUpload live, int generation, CancellationToken cancellationToken)
+    {
+        string staging;
+        IUploadSession session;
+        lock (entry.Gate)
+        {
+            if (entry.Live != live || live.Abandoned || live.Session == null || string.IsNullOrEmpty(entry.StagingPath))
+            {
+                return false;
+            }
+
+            if (entry.DeletePending || entry.Opens > 0 || entry.Generation != generation)
+            {
+                Abandon(entry, sticky: true);
+                return false;
+            }
+
+            staging = entry.StagingPath;
+            session = live.Session;
+        }
+
+        lock (Gate(staging))
+        {
+            string parent;
+            string name;
+            string? replace;
+            lock (entry.Gate)
+            {
+                if (entry.Live != live || live.Abandoned || !entry.Dirty || entry.DeletePending || entry.StagingPath != staging)
+                {
+                    return false;
+                }
+
+                if (entry.Opens > 0 || entry.Generation != generation)
+                {
+                    Abandon(entry, sticky: true);
+                    return false;
+                }
+
+                parent = entry.ParentHandle;
+                name = entry.RemoteName;
+                replace = Replacement(entry);
+            }
+
+            var node = Wait(session.CompleteAsync(parent, name, replace, cancellationToken));
+            ApplyUploaded(entry, generation, node);
+            Report(staging, name, 0, 0, false);
+            _log?.Invoke($"Uploaded {name}.");
+            return true;
+        }
+    }
+
     private void Upload(Entry entry, int generation, CancellationToken cancellationToken)
+    {
+        string staging;
+        lock (entry.Gate)
+        {
+            if (entry.Live != null && !entry.Live.Abandoned)
+            {
+                return;
+            }
+
+            if (!entry.Dirty || entry.DeletePending || string.IsNullOrEmpty(entry.StagingPath) || !File.Exists(entry.StagingPath))
+            {
+                return;
+            }
+
+            staging = entry.StagingPath;
+        }
+
+        // One upload owns this staging file. A flush waits for it instead of opening the same copy.
+        lock (Gate(staging))
+        {
+            UploadLocked(entry, generation, staging, cancellationToken);
+        }
+    }
+
+    private object Gate(string staging) => _uploadGates.GetOrAdd(staging, _ => new object());
+
+    private void UploadLocked(Entry entry, int generation, string staging, CancellationToken cancellationToken)
     {
         string parent;
         string name;
-        string staging;
         string? replace;
         lock (entry.Gate)
         {
-            if (!entry.Dirty || entry.DeletePending || string.IsNullOrEmpty(entry.StagingPath) || !File.Exists(entry.StagingPath))
+            if (!entry.Dirty || entry.DeletePending || entry.StagingPath != staging || !File.Exists(staging))
             {
                 return;
             }
 
             parent = entry.ParentHandle;
             name = entry.RemoteName;
-            staging = entry.StagingPath;
             replace = Replacement(entry);
             generation = entry.Generation;
         }
 
-        var copy = staging + ".upload";
-        File.Copy(staging, copy, overwrite: true);
+        var copy = staging + "." + Guid.NewGuid().ToString("n") + ".upload";
         try
         {
-            var node = Wait(_store.UploadAsync(parent, name, copy, replace, cancellationToken));
-            lock (_tree)
-            {
-                _byHandle.Remove(entry.Handle);
-                entry.Handle = node.Handle;
-                _byHandle[entry.Handle] = entry;
-            }
-
-            string? discard = null;
-            var stillDirty = false;
-            lock (entry.Gate)
-            {
-                if (node.Modified != default)
-                {
-                    entry.Modified = node.Modified;
-                }
-
-                if (entry.Generation == generation && !entry.DeletePending)
-                {
-                    entry.Dirty = false;
-                    entry.Size = node.Size;
-                    if (entry.Opens == 0)
-                    {
-                        discard = entry.StagingPath;
-                        entry.StagingPath = null;
-                        entry.ReplaceHandle = null;
-                    }
-                }
-                else
-                {
-                    stillDirty = entry.Dirty && !entry.DeletePending;
-                }
-            }
-
-            if (discard != null)
-            {
-                TryDelete(discard);
-                RemoveJournal(discard);
-            }
-            else if (stillDirty)
-            {
-                Remember(entry);
-            }
-
+            FileRetry.Copy(staging, copy);
+            var length = new System.IO.FileInfo(copy).Length;
+            Report(staging, name, 0, length, true);
+            var node = Wait(_store.UploadAsync(parent, name, copy, replace, cancellationToken, sent => Report(staging, name, sent, length, true)));
+            ApplyUploaded(entry, generation, node);
             _log?.Invoke($"Uploaded {name}.");
         }
         finally
         {
+            Report(staging, name, 0, 0, false);
             TryDelete(copy);
+        }
+    }
+
+    private void Report(string? id, string name, long sent, long total, bool active)
+    {
+        if (_progress == null || string.IsNullOrEmpty(id))
+        {
+            return;
+        }
+
+        try
+        {
+            _progress(new UploadSample(id, name, sent < 0 ? 0 : sent, total < 0 ? 0 : total, active));
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void ApplyUploaded(Entry entry, int generation, CloudNode node)
+    {
+        lock (_tree)
+        {
+            _byHandle.Remove(entry.Handle);
+            entry.Handle = node.Handle;
+            _byHandle[entry.Handle] = entry;
+        }
+
+        string? discard = null;
+        var stillDirty = false;
+        lock (entry.Gate)
+        {
+            if (node.Modified != default)
+            {
+                entry.Modified = node.Modified;
+            }
+
+            if (entry.Generation == generation && !entry.DeletePending)
+            {
+                entry.Dirty = false;
+                entry.Size = node.Size;
+                entry.UploadAbandoned = false;
+                entry.Live = null;
+                if (entry.Opens == 0)
+                {
+                    discard = entry.StagingPath;
+                    entry.StagingPath = null;
+                    entry.ReplaceHandle = null;
+                    entry.Written = 0;
+                }
+            }
+            else
+            {
+                stillDirty = entry.Dirty && !entry.DeletePending;
+            }
+        }
+
+        if (discard != null)
+        {
+            TryDelete(discard);
+            RemoveJournal(discard);
+        }
+        else if (stillDirty)
+        {
+            Remember(entry);
         }
     }
 
@@ -1104,6 +1536,11 @@ public sealed class CloudFileSystem : FileSystemBase
                     throw new IOException("That folder is not empty.");
                 }
             }
+        }
+
+        lock (entry.Gate)
+        {
+            Abandon(entry, sticky: true);
         }
 
         string? replace;
@@ -1168,9 +1605,14 @@ public sealed class CloudFileSystem : FileSystemBase
             {
                 using var stream = new FileStream(staging, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
                 entry.Size = 0;
+                entry.Written = 0;
                 entry.Dirty = true;
                 entry.Generation++;
                 entry.Modified = DateTimeOffset.UtcNow;
+                if (entry.Live != null)
+                {
+                    Abandon(entry, sticky: true);
+                }
             }
 
             Remember(entry);
@@ -1218,9 +1660,14 @@ public sealed class CloudFileSystem : FileSystemBase
                 if (discardCloudContent)
                 {
                     entry.Size = 0;
+                    entry.Written = 0;
                     entry.Dirty = true;
                     entry.Generation++;
                     entry.Modified = DateTimeOffset.UtcNow;
+                    if (entry.Live != null)
+                    {
+                        Abandon(entry, sticky: true);
+                    }
                 }
             }
         }
@@ -1512,6 +1959,23 @@ public sealed class CloudFileSystem : FileSystemBase
         return Path.Combine(_stagingDirectory, Guid.NewGuid().ToString("n"));
     }
 
+    private void SweepStagingTemps()
+    {
+        if (!Directory.Exists(_stagingDirectory))
+        {
+            return;
+        }
+
+        foreach (var path in Directory.EnumerateFiles(_stagingDirectory))
+        {
+            var name = Path.GetFileName(path);
+            if (name.Contains(".upload", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".cipher", StringComparison.OrdinalIgnoreCase))
+            {
+                TryDelete(path);
+            }
+        }
+    }
+
     private int StatusFor(Exception ex)
     {
         var error = Unwrap(ex);
@@ -1644,6 +2108,61 @@ public sealed class CloudFileSystem : FileSystemBase
         return bytes;
     }
 
+    private sealed class LiveUpload
+    {
+        private readonly object _dispose = new();
+        private bool _disposed;
+
+        public required long Target { get; init; }
+
+        public IUploadSession? Session { get; set; }
+
+        public long Sent { get; set; }
+
+        public long Reserved { get; set; }
+
+        public bool Closed { get; set; }
+
+        public bool Abandoned { get; set; }
+
+        public Exception? Fault { get; set; }
+
+        public Task Pump { get; set; } = Task.CompletedTask;
+
+        public CancellationTokenSource Cancel { get; } = new();
+
+        public ManualResetEventSlim Signal { get; } = new(false);
+
+        public void DisposeSignals()
+        {
+            lock (_dispose)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+            }
+
+            try
+            {
+                Cancel.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            try
+            {
+                Signal.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
     private sealed class Entry
     {
         public required string Handle { get; set; }
@@ -1671,6 +2190,12 @@ public sealed class CloudFileSystem : FileSystemBase
         public string? StagingPath { get; set; }
 
         public string? ReplaceHandle { get; set; }
+
+        public long Written { get; set; }
+
+        public bool UploadAbandoned { get; set; }
+
+        public LiveUpload? Live { get; set; }
 
         public Entry? Parent { get; set; }
 

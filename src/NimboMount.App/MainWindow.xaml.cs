@@ -25,6 +25,8 @@ public partial class MainWindow : Window
     private bool _balloonShown;
     private bool _mounted;
     private bool _applyingStartup;
+    private readonly UploadMeter _uploads = new();
+    private long _uploadPaintAt;
 
     public MainWindow()
     {
@@ -333,7 +335,7 @@ public partial class MainWindow : Window
         var letter = SelectedLetter();
         SetBusy(true);
         SetStatus("Mounting " + letter + ": ...", "#D0D0D0");
-        var fileSystem = new CloudFileSystem(_client, AppPaths.Directory, Log);
+        var fileSystem = new CloudFileSystem(_client, AppPaths.Directory, Log, OnUploadSample);
         var drive = new DriveHost();
         try
         {
@@ -513,6 +515,7 @@ public partial class MainWindow : Window
         PasswordInput.IsEnabled = !_busy && !signedIn;
         LetterBox.IsEnabled = !_busy && !_mounted;
         ConnectButton.Content = signedIn ? "Mount" : "Connect and mount";
+        PaintUploads();
         if (_busy)
         {
             return;
@@ -607,6 +610,125 @@ public partial class MainWindow : Window
             _applyingStartup = false;
             Log("Windows startup could not be updated. " + ex.Message);
         }
+    }
+
+    private void OnUploadSample(UploadSample sample)
+    {
+        _uploads.Apply(sample);
+        var now = Environment.TickCount64;
+        if (sample.Active && now < _uploadPaintAt)
+        {
+            return;
+        }
+
+        _uploadPaintAt = now + 200;
+        try
+        {
+            Dispatcher.BeginInvoke(PaintUploads);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void PaintUploads()
+    {
+        var views = _uploads.Snapshot();
+        UploadList.Children.Clear();
+        var busy = views.Length > 0;
+        UploadPanel.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        UploadHint.Visibility = busy ? Visibility.Collapsed : Visibility.Visible;
+        var shown = Math.Min(views.Length, 3);
+        for (var i = 0; i < shown; i++)
+        {
+            UploadList.Children.Add(UploadRow(views[i]));
+        }
+
+        if (views.Length > shown)
+        {
+            UploadList.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = (views.Length - shown).ToString() + " more",
+                Foreground = UploadMuted,
+                FontSize = 12,
+                Margin = new Thickness(0, 2, 0, 0),
+            });
+        }
+
+        Title = UploadCaption.Title(views);
+        if (_tray == null)
+        {
+            return;
+        }
+
+        var tip = views.Length > 0 ? UploadCaption.Tray(views) : IdleTip();
+        _tray.Text = tip.Length <= 127 ? tip : tip[..127];
+    }
+
+    private string IdleTip()
+    {
+        if (_mounted)
+        {
+            return "NimboMount\nMounted at " + (_drive?.MountPoint ?? SelectedLetter() + ":");
+        }
+
+        if (_client != null)
+        {
+            return "NimboMount\nConnected";
+        }
+
+        return "NimboMount";
+    }
+
+    private static System.Windows.Controls.Grid UploadRow(UploadView view)
+    {
+        var row = new System.Windows.Controls.Grid { Margin = new Thickness(0, 0, 0, 8) };
+        row.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = GridLength.Auto });
+        row.RowDefinitions.Add(new System.Windows.Controls.RowDefinition { Height = GridLength.Auto });
+        var line = new System.Windows.Controls.DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 4) };
+        var detail = new System.Windows.Controls.TextBlock
+        {
+            Text = UploadCaption.Detail(view.Sent, view.Total, view.BytesPerSecond),
+            Foreground = UploadMuted,
+            FontSize = 12,
+            Margin = new Thickness(12, 0, 0, 0),
+        };
+        System.Windows.Controls.DockPanel.SetDock(detail, System.Windows.Controls.Dock.Right);
+        line.Children.Add(detail);
+        line.Children.Add(new System.Windows.Controls.TextBlock
+        {
+            Text = view.Name,
+            Foreground = UploadName,
+            FontSize = 13,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+        });
+        var percent = view.Total <= 0 ? 0 : Math.Clamp(view.Sent * 100d / view.Total, 0, 100);
+        var bar = new System.Windows.Controls.ProgressBar
+        {
+            Height = 4,
+            Minimum = 0,
+            Maximum = 100,
+            Value = percent,
+            Background = UploadTrack,
+            Foreground = UploadFill,
+            BorderThickness = new Thickness(0),
+        };
+        System.Windows.Controls.Grid.SetRow(bar, 1);
+        row.Children.Add(line);
+        row.Children.Add(bar);
+        return row;
+    }
+
+    private static readonly SolidColorBrush UploadTrack = Frozen("#2A2A2A");
+    private static readonly SolidColorBrush UploadFill = Frozen("#E10600");
+    private static readonly SolidColorBrush UploadName = Frozen("#F4F4F4");
+    private static readonly SolidColorBrush UploadMuted = Frozen("#9A9A9A");
+
+    private static SolidColorBrush Frozen(string hex)
+    {
+        var brush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)!);
+        brush.Freeze();
+        return brush;
     }
 
     private void Log(string message)
